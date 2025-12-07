@@ -7,6 +7,7 @@ pub mod execution;
 pub mod relationship;
 pub mod serialization;
 pub mod ui;
+pub mod validation;
 
 // Re-export main types for convenience
 pub use canvas::Canvas;
@@ -16,3 +17,4 @@ pub use execution::{CellData, ExecutionEngine, ExecutionMode, ExecutionReport, E
 pub use relationship::Relationship;
 pub use serialization::{ExternalFileHandle, Manifest, Project};
 pub use ui::GraphCellEditorApp;
+pub use validation::{ValidationIssue, ValidationResult, ValidationSeverity, ValidatedCanvas};
