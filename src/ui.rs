@@ -1,9 +1,14 @@
-use crate::{Canvas, CellContent, CellType, Project, Rectangle, SplitDirection};
+use crate::{
+    validation::{ValidatedCanvas, ValidationSeverity},
+    Canvas, CellContent, CellType, ExecutionEngine, ExecutionMode, Project, Rectangle,
+    SplitDirection,
+};
 use anyhow::Result;
 use egui::{
     epaint::PathShape, pos2, vec2, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke,
     Vec2,
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 use ulid::Ulid;
 
@@ -29,6 +34,18 @@ pub struct GraphCellEditorApp {
 
     /// Status message
     status_message: String,
+
+    /// Execution engine
+    execution_engine: ExecutionEngine,
+
+    /// Validation issues per cell
+    validation_issues: HashMap<Ulid, ValidationSeverity>,
+
+    /// Whether validation panel is visible
+    show_validation_panel: bool,
+
+    /// Execution progress message
+    execution_progress: Option<String>,
 }
 
 #[derive(Default)]
@@ -81,6 +98,10 @@ impl GraphCellEditorApp {
                 ..Default::default()
             },
             status_message: "Welcome to Graph Cell Editor!".to_string(),
+            execution_engine: ExecutionEngine::new(ExecutionMode::Run),
+            validation_issues: HashMap::new(),
+            show_validation_panel: true,
+            execution_progress: None,
         }
     }
 
@@ -100,6 +121,10 @@ impl GraphCellEditorApp {
                 ..Default::default()
             },
             status_message: format!("Loaded project from {}", project.root_dir().display()),
+            execution_engine: ExecutionEngine::new(ExecutionMode::Run),
+            validation_issues: HashMap::new(),
+            show_validation_panel: true,
+            execution_progress: None,
         })
     }
 
@@ -123,8 +148,74 @@ impl GraphCellEditorApp {
         }
     }
 
+    /// Validate the canvas and update validation state
+    fn validate_canvas(&mut self) {
+        let result = self.canvas.validate();
+        self.validation_issues = self.canvas.cells_with_issues(&result);
+
+        let error_count = result.errors().len();
+        let warning_count = result.warnings().len();
+        let info_count = result.info().len();
+
+        self.status_message = if error_count > 0 {
+            format!("❌ Validation: {} errors, {} warnings", error_count, warning_count)
+        } else if warning_count > 0 {
+            format!("⚠ Validation: {} warnings, {} info", warning_count, info_count)
+        } else {
+            format!("✓ Validation passed ({} info)", info_count)
+        };
+    }
+
+    /// Execute the canvas with the given mode
+    fn execute_canvas(&mut self, mode: ExecutionMode) {
+        // First validate
+        let result = self.canvas.validate();
+        if !result.is_valid() {
+            self.status_message = format!("❌ Cannot execute: {} validation errors", result.errors().len());
+            return;
+        }
+
+        self.execution_progress = Some(format!("Executing in {:?} mode...", mode));
+
+        // Create a new execution engine with the desired mode
+        let mut engine = ExecutionEngine::new(mode);
+
+        match engine.execute(&self.canvas) {
+            Ok(report) => {
+                let status_msg = match report.status {
+                    crate::ExecutionStatus::Complete => {
+                        format!("✓ Execution completed: {} cells executed", report.total_cells_executed)
+                    }
+                    crate::ExecutionStatus::Paused => {
+                        format!("⏸ Execution paused at step {}", report.step)
+                    }
+                    crate::ExecutionStatus::Error(ref e) => {
+                        format!("❌ Execution error: {}", e)
+                    }
+                    _ => "Execution status unknown".to_string(),
+                };
+
+                self.status_message = status_msg;
+                self.execution_progress = None;
+
+                // Store the engine for potential resume in Step mode
+                self.execution_engine = engine;
+            }
+            Err(e) => {
+                self.status_message = format!("❌ Execution error: {}", e);
+                self.execution_progress = None;
+            }
+        }
+    }
+
     /// Render the entire UI
     fn render_ui(&mut self, ctx: &egui::Context) {
+        // Update validation state if validation panel is visible
+        if self.show_validation_panel {
+            let result = self.canvas.validate();
+            self.validation_issues = self.canvas.cells_with_issues(&result);
+        }
+
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -141,6 +232,7 @@ impl GraphCellEditorApp {
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.ui_state.show_grid, "Show Grid");
                     ui.checkbox(&mut self.ui_state.show_cell_ids, "Show Cell IDs");
+                    ui.checkbox(&mut self.show_validation_panel, "Show Validation Panel");
                     if ui.button("Reset Zoom").clicked() {
                         self.zoom = 1.0;
                         self.canvas_offset = Vec2::ZERO;
@@ -149,12 +241,13 @@ impl GraphCellEditorApp {
                 });
 
                 ui.menu_button("Help", |ui| {
-                    ui.label("Graph Cell Editor - Phase 3");
-                    ui.label("Version 0.1.0");
+                    ui.label("Graph Cell Editor - MVP Complete");
+                    ui.label("Version 1.0.0 (All 5 Phases)");
                     ui.separator();
                     ui.label("Click to select cells");
-                    ui.label("Right-click for context menu");
-                    ui.label("Scroll to zoom");
+                    ui.label("Use toolbar to split cells and create relationships");
+                    ui.label("Scroll to zoom, drag to pan");
+                    ui.label("Validate before execution");
                 });
             });
         });
@@ -162,6 +255,7 @@ impl GraphCellEditorApp {
         // Toolbar
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                // Cell operations
                 if ui.button("➗ Split H").clicked() {
                     self.split_selected_cell(SplitDirection::Horizontal);
                 }
@@ -188,9 +282,36 @@ impl GraphCellEditorApp {
 
                 ui.separator();
 
+                // Validation
+                if ui.button("✓ Validate").clicked() {
+                    self.validate_canvas();
+                }
+
+                ui.separator();
+
+                // Execution controls
+                if ui.button("▶ Run").clicked() {
+                    self.execute_canvas(ExecutionMode::Run);
+                }
+                if ui.button("⏯ Step").clicked() {
+                    self.execute_canvas(ExecutionMode::Step);
+                }
+                if ui.button("🔍 Dry Run").clicked() {
+                    self.execute_canvas(ExecutionMode::DryRun);
+                }
+
+                ui.separator();
+
+                // Stats
                 ui.label(format!("Cells: {}", self.canvas.cell_count()));
                 ui.label(format!("Relationships: {}", self.canvas.relationship_count()));
                 ui.label(format!("Zoom: {:.0}%", self.zoom * 100.0));
+
+                // Execution progress
+                if let Some(progress) = &self.execution_progress {
+                    ui.separator();
+                    ui.label(progress);
+                }
             });
         });
 
@@ -200,6 +321,15 @@ impl GraphCellEditorApp {
                 ui.label(&self.status_message);
             });
         });
+
+        // Validation panel (bottom)
+        if self.show_validation_panel {
+            egui::TopBottomPanel::bottom("validation_panel")
+                .default_height(200.0)
+                .show(ctx, |ui| {
+                    self.render_validation_panel(ui);
+                });
+        }
 
         // Right panel (properties)
         egui::SidePanel::right("properties_panel")
@@ -331,6 +461,90 @@ impl GraphCellEditorApp {
         }
     }
 
+    /// Render the validation panel
+    fn render_validation_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Validation");
+        ui.separator();
+
+        // Run validation
+        let result = self.canvas.validate();
+
+        // Show summary
+        let error_count = result.errors().len();
+        let warning_count = result.warnings().len();
+        let info_count = result.info().len();
+
+        ui.horizontal(|ui| {
+            if error_count > 0 {
+                ui.colored_label(Color32::RED, format!("❌ {} Errors", error_count));
+            }
+            if warning_count > 0 {
+                ui.colored_label(Color32::from_rgb(255, 165, 0), format!("⚠ {} Warnings", warning_count));
+            }
+            if info_count > 0 {
+                ui.colored_label(Color32::BLUE, format!("ℹ {} Info", info_count));
+            }
+            if error_count == 0 && warning_count == 0 {
+                ui.colored_label(Color32::GREEN, "✓ All checks passed");
+            }
+        });
+
+        ui.separator();
+
+        // Show issues in scrollable area
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // Errors
+            if !result.errors().is_empty() {
+                ui.label(egui::RichText::new("Errors:").color(Color32::RED).strong());
+                for issue in result.errors() {
+                    ui.horizontal(|ui| {
+                        ui.label("❌");
+                        ui.label(&issue.message);
+                        if let Some(&cell_id) = issue.affected_cells.first() {
+                            if ui.small_button("Go to").clicked() {
+                                self.selected_cell = Some(cell_id);
+                            }
+                        }
+                    });
+                }
+                ui.add_space(10.0);
+            }
+
+            // Warnings
+            if !result.warnings().is_empty() {
+                ui.label(egui::RichText::new("Warnings:").color(Color32::from_rgb(255, 165, 0)).strong());
+                for issue in result.warnings() {
+                    ui.horizontal(|ui| {
+                        ui.label("⚠");
+                        ui.label(&issue.message);
+                        if let Some(&cell_id) = issue.affected_cells.first() {
+                            if ui.small_button("Go to").clicked() {
+                                self.selected_cell = Some(cell_id);
+                            }
+                        }
+                    });
+                }
+                ui.add_space(10.0);
+            }
+
+            // Info
+            if !result.info().is_empty() {
+                ui.label(egui::RichText::new("Info:").color(Color32::BLUE).strong());
+                for issue in result.info() {
+                    ui.horizontal(|ui| {
+                        ui.label("ℹ");
+                        ui.label(&issue.message);
+                        if let Some(&cell_id) = issue.affected_cells.first() {
+                            if ui.small_button("Go to").clicked() {
+                                self.selected_cell = Some(cell_id);
+                            }
+                        }
+                    });
+                }
+            }
+        });
+    }
+
     /// Render the canvas with cells and relationships
     fn render_canvas(&mut self, ui: &mut egui::Ui) {
         let (response, painter) =
@@ -452,8 +666,14 @@ impl GraphCellEditorApp {
             (fill, Color32::DARK_GRAY, 2.0)
         };
 
-        // Special highlight for start point
-        let final_stroke_color = if cell.is_start_point {
+        // Check for validation issues and override stroke color
+        let final_stroke_color = if let Some(severity) = self.validation_issues.get(&cell.id) {
+            match severity {
+                ValidationSeverity::Error => Color32::RED,
+                ValidationSeverity::Warning => Color32::from_rgb(255, 165, 0), // Orange
+                ValidationSeverity::Info => Color32::BLUE,
+            }
+        } else if cell.is_start_point {
             Color32::from_rgb(255, 140, 0) // Orange for start point
         } else {
             stroke_color
