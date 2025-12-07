@@ -88,6 +88,11 @@ impl Canvas {
         &self.cells
     }
 
+    /// Get mutable access to cells (for deserialization)
+    pub(crate) fn cells_mut(&mut self) -> &mut HashMap<Ulid, Cell> {
+        &mut self.cells
+    }
+
     /// Update a cell's content
     pub fn update_cell_content(&mut self, id: Ulid, content: CellContent) -> Result<()> {
         let cell = self
@@ -228,6 +233,11 @@ impl Canvas {
     /// Get all relationships
     pub fn relationships(&self) -> &HashMap<(Ulid, Ulid), Relationship> {
         &self.relationships
+    }
+
+    /// Get mutable access to relationships (for deserialization)
+    pub(crate) fn relationships_mut(&mut self) -> &mut HashMap<(Ulid, Ulid), Relationship> {
+        &mut self.relationships
     }
 
     /// Delete a relationship
@@ -494,6 +504,11 @@ impl Canvas {
     /// Get the root cell ID
     pub fn root_cell(&self) -> Option<Ulid> {
         self.root_cell
+    }
+
+    /// Set the root cell (for deserialization)
+    pub(crate) fn set_root_cell(&mut self, root: Ulid) {
+        self.root_cell = Some(root);
     }
 
     /// Get the start point cell
