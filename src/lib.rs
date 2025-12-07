@@ -5,6 +5,7 @@ pub mod cell;
 pub mod event;
 pub mod relationship;
 pub mod serialization;
+pub mod ui;
 
 // Re-export main types for convenience
 pub use canvas::Canvas;
@@ -12,3 +13,4 @@ pub use cell::{Cell, CellContent, CellType, Rectangle};
 pub use event::{EventType, GraphEvent, SplitDirection};
 pub use relationship::Relationship;
 pub use serialization::{ExternalFileHandle, Manifest, Project};
+pub use ui::GraphCellEditorApp;
