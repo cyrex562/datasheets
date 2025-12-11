@@ -1,7 +1,43 @@
-use crate::{Cell, CellContent, CellType, EventType, GraphEvent, Rectangle, Relationship, SplitDirection};
+use crate::{
+    Cell, CellContent, CellType, EventType, GraphEvent, IdGenerator, Rectangle, Relationship,
+    SplitDirection,
+};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use ulid::Ulid;
+
+/// Visual guide showing snap alignment
+#[derive(Debug, Clone, Copy)]
+pub struct SnapGuide {
+    /// Whether this is a vertical or horizontal guide
+    pub is_vertical: bool,
+    /// Position of the guide (x for vertical, y for horizontal)
+    pub position: f32,
+    /// Start of the guide line
+    pub start: f32,
+    /// End of the guide line  
+    pub end: f32,
+}
+
+impl SnapGuide {
+    pub fn vertical(x: f32, y_start: f32, y_end: f32) -> Self {
+        Self {
+            is_vertical: true,
+            position: x,
+            start: y_start,
+            end: y_end,
+        }
+    }
+
+    pub fn horizontal(y: f32, x_start: f32, x_end: f32) -> Self {
+        Self {
+            is_vertical: false,
+            position: y,
+            start: x_start,
+            end: x_end,
+        }
+    }
+}
 
 /// Canvas containing all cells and relationships
 #[derive(Debug, Clone)]
@@ -18,6 +54,8 @@ pub struct Canvas {
     /// Event log for history tracking
     events: Vec<GraphEvent>,
 
+    /// ID generator for short alphanumeric IDs
+    id_generator: IdGenerator,
     // Future: spatial index (quadtree) for fast adjacency queries
 }
 
@@ -29,13 +67,15 @@ impl Canvas {
             relationships: HashMap::new(),
             root_cell: None,
             events: Vec::new(),
+            id_generator: IdGenerator::new(),
         }
     }
 
     /// Create a canvas with an initial root cell
     pub fn with_root_cell(cell_type: CellType, bounds: Rectangle, content: CellContent) -> Self {
         let mut canvas = Self::new();
-        let cell = Cell::new(cell_type, bounds, content);
+        let short_id = canvas.id_generator.next();
+        let cell = Cell::new(cell_type, bounds, content, short_id);
         let cell_id = cell.id;
         canvas.cells.insert(cell_id, cell);
         canvas.root_cell = Some(cell_id);
@@ -59,7 +99,8 @@ impl Canvas {
         bounds: Rectangle,
         content: CellContent,
     ) -> Ulid {
-        let cell = Cell::new(cell_type, bounds, content);
+        let short_id = self.id_generator.next();
+        let cell = Cell::new(cell_type, bounds, content, short_id);
         let cell_id = cell.id;
 
         self.log_event(EventType::CellCreated {
@@ -86,6 +127,219 @@ impl Canvas {
     /// Get all cells
     pub fn cells(&self) -> &HashMap<Ulid, Cell> {
         &self.cells
+    }
+
+    /// Get a cell by short ID
+    pub fn get_cell_by_short_id(&self, short_id: &str) -> Option<&Cell> {
+        self.cells
+            .values()
+            .find(|c| c.short_id.eq_ignore_ascii_case(short_id))
+    }
+
+    /// Get a cell ID by short ID
+    pub fn get_cell_id_by_short_id(&self, short_id: &str) -> Option<Ulid> {
+        self.cells
+            .values()
+            .find(|c| c.short_id.eq_ignore_ascii_case(short_id))
+            .map(|c| c.id)
+    }
+
+    /// Snapping threshold in canvas units
+    const SNAP_THRESHOLD: f32 = 10.0;
+
+    /// Update cell bounds with optional snapping to nearby cells
+    /// Cells move freely - snapping only helps alignment, doesn't enforce constraints
+    pub fn resize_cell_with_snap(
+        &mut self,
+        cell_id: Ulid,
+        new_bounds: Rectangle,
+    ) -> (Rectangle, Vec<SnapGuide>) {
+        let snapped_bounds = self.apply_snapping(cell_id, new_bounds);
+        let guides = self.calculate_snap_guides(cell_id, &snapped_bounds);
+
+        if let Some(cell) = self.cells.get_mut(&cell_id) {
+            cell.set_bounds(snapped_bounds);
+        }
+
+        (snapped_bounds, guides)
+    }
+
+    /// Move a cell to a new position with snapping
+    pub fn move_cell_with_snap(
+        &mut self,
+        cell_id: Ulid,
+        new_x: f32,
+        new_y: f32,
+    ) -> (Rectangle, Vec<SnapGuide>) {
+        let cell = match self.cells.get(&cell_id) {
+            Some(c) => c.clone(),
+            None => return (Rectangle::new(new_x, new_y, 100.0, 100.0), vec![]),
+        };
+
+        let new_bounds = Rectangle::new(new_x, new_y, cell.bounds.width, cell.bounds.height);
+        self.resize_cell_with_snap(cell_id, new_bounds)
+    }
+
+    /// Apply snapping to bounds based on nearby cells
+    fn apply_snapping(&self, cell_id: Ulid, bounds: Rectangle) -> Rectangle {
+        let mut result = bounds;
+
+        // Get all other leaf cells
+        let other_cells: Vec<Rectangle> = self
+            .cells
+            .iter()
+            .filter(|(id, c)| **id != cell_id && c.children.is_empty())
+            .map(|(_, c)| c.bounds)
+            .collect();
+
+        // Collect all edges to snap to
+        let mut x_edges: Vec<f32> = Vec::new();
+        let mut y_edges: Vec<f32> = Vec::new();
+
+        for other in &other_cells {
+            x_edges.push(other.x); // left edge
+            x_edges.push(other.x + other.width); // right edge
+            y_edges.push(other.y); // top edge
+            y_edges.push(other.y + other.height); // bottom edge
+        }
+
+        // Check left edge snap
+        let my_left = result.x;
+        if let Some(&snap_x) = x_edges
+            .iter()
+            .find(|&&x| (x - my_left).abs() < Self::SNAP_THRESHOLD)
+        {
+            result.x = snap_x;
+        }
+
+        // Check right edge snap
+        let my_right = result.x + result.width;
+        if let Some(&snap_x) = x_edges
+            .iter()
+            .find(|&&x| (x - my_right).abs() < Self::SNAP_THRESHOLD)
+        {
+            result.width = snap_x - result.x;
+        }
+
+        // Check top edge snap
+        let my_top = result.y;
+        if let Some(&snap_y) = y_edges
+            .iter()
+            .find(|&&y| (y - my_top).abs() < Self::SNAP_THRESHOLD)
+        {
+            result.y = snap_y;
+        }
+
+        // Check bottom edge snap
+        let my_bottom = result.y + result.height;
+        if let Some(&snap_y) = y_edges
+            .iter()
+            .find(|&&y| (y - my_bottom).abs() < Self::SNAP_THRESHOLD)
+        {
+            result.height = snap_y - result.y;
+        }
+
+        // Ensure minimum size
+        result.width = result.width.max(50.0);
+        result.height = result.height.max(50.0);
+
+        result
+    }
+
+    /// Calculate snap guides to display (lines showing alignment)
+    fn calculate_snap_guides(&self, cell_id: Ulid, bounds: &Rectangle) -> Vec<SnapGuide> {
+        let mut guides = Vec::new();
+
+        let other_cells: Vec<Rectangle> = self
+            .cells
+            .iter()
+            .filter(|(id, c)| **id != cell_id && c.children.is_empty())
+            .map(|(_, c)| c.bounds)
+            .collect();
+
+        let my_left = bounds.x;
+        let my_right = bounds.x + bounds.width;
+        let my_top = bounds.y;
+        let my_bottom = bounds.y + bounds.height;
+
+        for other in &other_cells {
+            let other_left = other.x;
+            let other_right = other.x + other.width;
+            let other_top = other.y;
+            let other_bottom = other.y + other.height;
+
+            // Left edge alignments
+            if (my_left - other_left).abs() < 1.0 {
+                guides.push(SnapGuide::vertical(
+                    my_left,
+                    my_top.min(other_top),
+                    my_bottom.max(other_bottom),
+                ));
+            }
+            if (my_left - other_right).abs() < 1.0 {
+                guides.push(SnapGuide::vertical(
+                    my_left,
+                    my_top.min(other_top),
+                    my_bottom.max(other_bottom),
+                ));
+            }
+
+            // Right edge alignments
+            if (my_right - other_left).abs() < 1.0 {
+                guides.push(SnapGuide::vertical(
+                    my_right,
+                    my_top.min(other_top),
+                    my_bottom.max(other_bottom),
+                ));
+            }
+            if (my_right - other_right).abs() < 1.0 {
+                guides.push(SnapGuide::vertical(
+                    my_right,
+                    my_top.min(other_top),
+                    my_bottom.max(other_bottom),
+                ));
+            }
+
+            // Top edge alignments
+            if (my_top - other_top).abs() < 1.0 {
+                guides.push(SnapGuide::horizontal(
+                    my_top,
+                    my_left.min(other_left),
+                    my_right.max(other_right),
+                ));
+            }
+            if (my_top - other_bottom).abs() < 1.0 {
+                guides.push(SnapGuide::horizontal(
+                    my_top,
+                    my_left.min(other_left),
+                    my_right.max(other_right),
+                ));
+            }
+
+            // Bottom edge alignments
+            if (my_bottom - other_top).abs() < 1.0 {
+                guides.push(SnapGuide::horizontal(
+                    my_bottom,
+                    my_left.min(other_left),
+                    my_right.max(other_right),
+                ));
+            }
+            if (my_bottom - other_bottom).abs() < 1.0 {
+                guides.push(SnapGuide::horizontal(
+                    my_bottom,
+                    my_left.min(other_left),
+                    my_right.max(other_right),
+                ));
+            }
+        }
+
+        guides
+    }
+
+    /// Simple resize without snapping (for compatibility)
+    pub fn resize_cell_connected(&mut self, cell_id: Ulid, new_bounds: Rectangle) -> Result<()> {
+        let (_, _) = self.resize_cell_with_snap(cell_id, new_bounds);
+        Ok(())
     }
 
     /// Get mutable access to cells (for deserialization)
@@ -175,11 +429,7 @@ impl Canvas {
     /// Set a cell as the start point
     pub fn set_start_point(&mut self, id: Ulid) -> Result<()> {
         // Find current start point
-        let old_start = self
-            .cells
-            .values()
-            .find(|c| c.is_start_point)
-            .map(|c| c.id);
+        let old_start = self.cells.values().find(|c| c.is_start_point).map(|c| c.id);
 
         // Clear old start point
         if let Some(old_id) = old_start {
@@ -261,10 +511,7 @@ impl Canvas {
 
     /// Get all relationships ending at a cell
     pub fn get_incoming_relationships(&self, to: Ulid) -> Vec<&Relationship> {
-        self.relationships
-            .values()
-            .filter(|r| r.to == to)
-            .collect()
+        self.relationships.values().filter(|r| r.to == to).collect()
     }
 
     // ========== Cell Splitting ==========
@@ -330,10 +577,15 @@ impl Canvas {
             }
         };
 
+        // Generate short IDs for children
+        let child1_short_id = self.id_generator.next();
+        let child2_short_id = self.id_generator.next();
+
         // Create child cells
         // Child 1 inherits content, Child 2 is empty
         let child1 = Cell {
             id: child1_id,
+            short_id: child1_short_id,
             name: None, // Names must be re-assigned by user
             cell_type: cell.cell_type,
             bounds: bounds1,
@@ -342,10 +594,13 @@ impl Canvas {
             parent: Some(cell_id),
             children: vec![],
             chunk_id: cell.chunk_id,
+            split_direction: Some(direction),
+            preview_mode: None,
         };
 
         let child2 = Cell {
             id: child2_id,
+            short_id: child2_short_id,
             name: None,
             cell_type: cell.cell_type,
             bounds: bounds2,
@@ -354,6 +609,8 @@ impl Canvas {
             parent: Some(cell_id),
             children: vec![],
             chunk_id: cell.chunk_id,
+            split_direction: Some(direction),
+            preview_mode: None,
         };
 
         // Update parent cell's children list
@@ -374,6 +631,46 @@ impl Canvas {
         });
 
         Ok((child1_id, child2_id))
+    }
+
+    /// Get the sibling of a cell (cell with the same parent)
+    pub fn get_sibling(&self, cell_id: Ulid) -> Option<Ulid> {
+        let cell = self.cells.get(&cell_id)?;
+        let parent_id = cell.parent?;
+        let parent = self.cells.get(&parent_id)?;
+
+        // Find the other child
+        for &child_id in &parent.children {
+            if child_id != cell_id {
+                return Some(child_id);
+            }
+        }
+        None
+    }
+
+    /// Get all cells that share the same parent with the given cell
+    pub fn get_siblings(&self, cell_id: Ulid) -> Vec<Ulid> {
+        let cell = match self.cells.get(&cell_id) {
+            Some(c) => c,
+            None => return vec![],
+        };
+
+        let parent_id = match cell.parent {
+            Some(p) => p,
+            None => return vec![],
+        };
+
+        let parent = match self.cells.get(&parent_id) {
+            Some(p) => p,
+            None => return vec![],
+        };
+
+        parent
+            .children
+            .iter()
+            .filter(|&&id| id != cell_id)
+            .copied()
+            .collect()
     }
 
     // ========== Cell Merging ==========
@@ -414,7 +711,8 @@ impl Canvas {
 
         // Create new merged cell
         let new_id = Ulid::new();
-        let merged_cell = Cell::new(new_type, merged_bounds, merged_content);
+        let short_id = self.id_generator.next();
+        let merged_cell = Cell::new(new_type, merged_bounds, merged_content, short_id);
 
         // Delete all old cells (this also removes their relationships)
         for id in &cell_ids {
@@ -584,7 +882,9 @@ mod tests {
         assert_eq!(cell.cell_type, CellType::Python);
 
         // Rename
-        canvas.rename_cell(id, Some("TestCell".to_string())).unwrap();
+        canvas
+            .rename_cell(id, Some("TestCell".to_string()))
+            .unwrap();
         let cell = canvas.get_cell(id).unwrap();
         assert_eq!(cell.name, Some("TestCell".to_string()));
 

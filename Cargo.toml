@@ -13,6 +13,9 @@ memmap2 = "0.9"
 egui = "0.29"
 eframe = "0.29"
 pyo3 = { version = "0.22", features = ["auto-initialize"] }
+pulldown-cmark = "0.9"
+arboard = "3.4"
+regex = "1.10"
 
 [dev-dependencies]
 tempfile = "3.0"
@@ -25,3 +28,7 @@ path = "examples/simple_workflow.rs"
 # Future phases may add:
 # hex = "0.4"
 # serde-pickle = "1.1"
+[[bin]]
+name = "graph_cell_editor"
+path = "src/main.rs"
+default-run = true

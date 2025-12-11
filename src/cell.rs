@@ -1,3 +1,4 @@
+use crate::SplitDirection;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use ulid::Ulid;
@@ -7,6 +8,9 @@ use ulid::Ulid;
 pub struct Cell {
     /// Unique identifier (sortable, timestamp-based)
     pub id: Ulid,
+
+    /// Short alphanumeric ID for easy reference (e.g., "A7", "2K")
+    pub short_id: String,
 
     /// Optional human-readable name for references
     pub name: Option<String>,
@@ -31,6 +35,29 @@ pub struct Cell {
 
     /// Future: chunk ID for performance optimization
     pub chunk_id: Option<Ulid>,
+
+    /// Direction this cell's parent was split (if it has a parent)
+    pub split_direction: Option<SplitDirection>,
+
+    /// Markdown preview mode (None = use global default)
+    pub preview_mode: Option<MarkdownPreviewMode>,
+}
+
+/// Markdown preview mode for text cells
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MarkdownPreviewMode {
+    /// Full markdown rendering (preview)
+    Rendered,
+    /// Plain text, no formatting
+    Raw,
+    /// Formatted raw markdown (syntax highlighting)
+    Hybrid,
+}
+
+impl Default for MarkdownPreviewMode {
+    fn default() -> Self {
+        Self::Rendered
+    }
 }
 
 impl Cell {
@@ -39,9 +66,11 @@ impl Cell {
         cell_type: CellType,
         bounds: Rectangle,
         content: CellContent,
+        short_id: String,
     ) -> Self {
         Self {
             id: Ulid::new(),
+            short_id,
             name: None,
             cell_type,
             bounds,
@@ -50,6 +79,8 @@ impl Cell {
             parent: None,
             children: Vec::new(),
             chunk_id: None,
+            split_direction: None,
+            preview_mode: None,
         }
     }
 
@@ -59,9 +90,11 @@ impl Cell {
         cell_type: CellType,
         bounds: Rectangle,
         content: CellContent,
+        short_id: String,
     ) -> Self {
         Self {
             id,
+            short_id,
             name: None,
             cell_type,
             bounds,
@@ -70,6 +103,8 @@ impl Cell {
             parent: None,
             children: Vec::new(),
             chunk_id: None,
+            split_direction: None,
+            preview_mode: None,
         }
     }
 
@@ -259,11 +294,8 @@ mod tests {
         let empty = CellContent::inline("");
         assert!(empty.is_empty());
 
-        let external = CellContent::external(
-            PathBuf::from("/path/to/file.txt"),
-            "External file",
-            false,
-        );
+        let external =
+            CellContent::external(PathBuf::from("/path/to/file.txt"), "External file", false);
         assert_eq!(external.as_str(), None);
         assert!(!external.is_empty());
     }
