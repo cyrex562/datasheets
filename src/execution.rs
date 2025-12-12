@@ -1,4 +1,4 @@
-use crate::{Canvas, Cell, CellType};
+use crate::{Canvas, Cell, CellContent, CellType};
 use anyhow::{anyhow, Result};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -235,6 +235,10 @@ impl ExecutionEngine {
         match cell.cell_type {
             CellType::Text => execute_text_cell(cell, inputs),
             CellType::Python => execute_python_cell(canvas, cell, inputs),
+            CellType::Math => execute_math_cell(canvas, cell),
+            CellType::NumberInt | CellType::NumberFloat | CellType::NumberCurrency => {
+                execute_number_cell(cell)
+            }
         }
     }
 
@@ -243,6 +247,10 @@ impl ExecutionEngine {
         match cell.cell_type {
             CellType::Text => Ok(CellData::Text("(dry-run)".to_string())),
             CellType::Python => validate_python_cell(cell, inputs),
+            CellType::Math => Ok(CellData::Text("(dry-run-math)".to_string())),
+            CellType::NumberInt | CellType::NumberFloat | CellType::NumberCurrency => {
+                Ok(CellData::Text("(dry-run-number)".to_string()))
+            }
         }
     }
 
@@ -298,6 +306,70 @@ impl ExecutionEngine {
         };
 
         Ok(self.create_report())
+    }
+
+    /// Recalculate Math cells that depend on a changed cell
+    /// Returns the list of recalculated cells and any errors
+    pub fn recalculate_dependents(
+        &mut self,
+        changed_cell_id: Ulid,
+        canvas: &mut Canvas,
+    ) -> Result<Vec<(Ulid, Result<f64, String>)>> {
+        let mut results = Vec::new();
+
+        // Get all Math cells that depend on the changed cell
+        let dependents = crate::math_eval::get_dependent_math_cells(changed_cell_id, canvas);
+
+        // Execute each dependent cell
+        for cell_id in dependents {
+            let cell = match canvas.get_cell(cell_id) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // Execute the math cell
+            let result = match execute_math_cell(canvas, cell) {
+                Ok(CellData::Number(value)) => {
+                    // Get target cell ID before mutable borrow
+                    let target_cell_id = canvas.get_cell(cell_id)
+                        .and_then(|c| c.result_target_cell);
+                    
+                    // Store result in cell's computed_result
+                    if let Some(cell_mut) = canvas.get_cell_mut(cell_id) {
+                        cell_mut.computed_result = Some(value);
+                    }
+
+                    // If there's a result_target_cell, update it
+                    if let Some(target_id) = target_cell_id {
+                        if let Some(target_cell) = canvas.get_cell_mut(target_id) {
+                            target_cell.computed_result = Some(value);
+                            
+                            // For Number type cells, also update their content
+                            if matches!(target_cell.cell_type, CellType::NumberInt | CellType::NumberFloat | CellType::NumberCurrency) {
+                                let formatted = match target_cell.cell_type {
+                                    CellType::NumberInt => format!("{}", value as i64),
+                                    CellType::NumberFloat => format!("{:.prec$}", value, prec = target_cell.decimal_precision as usize),
+                                    CellType::NumberCurrency => format!("{:.prec$}", value, prec = target_cell.decimal_precision as usize),
+                                    _ => value.to_string(),
+                                };
+                                target_cell.content = CellContent::inline(formatted);
+                            }
+                        }
+                    }
+
+                    // Store in outputs map
+                    self.cell_outputs.insert(cell_id, CellData::Number(value));
+
+                    Ok(value)
+                }
+                Ok(_) => Err("Math cell returned non-numeric result".to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+
+            results.push((cell_id, result));
+        }
+
+        Ok(results)
     }
 }
 
@@ -423,6 +495,41 @@ fn python_to_celldata(obj: &Bound<'_, PyAny>) -> Result<CellData> {
     }
 }
 
+/// Execute a Math cell - evaluate expression with cell references
+fn execute_math_cell(canvas: &Canvas, cell: &Cell) -> Result<CellData> {
+    // Get formula from cell content
+    let formula = cell
+        .content
+        .as_str()
+        .ok_or_else(|| anyhow!("Math cell has no inline content"))?;
+
+    // Check for circular references
+    if let Err(cycle) = crate::math_eval::detect_circular_references(cell.id, canvas) {
+        return Err(anyhow!("Circular reference detected: {}", cycle.join(" → ")));
+    }
+
+    // Evaluate the expression
+    let result = crate::math_eval::evaluate_expression(formula, canvas)
+        .map_err(|e| anyhow!("Math evaluation error in cell {}: {}", cell.short_id, e))?;
+
+    Ok(CellData::Number(result))
+}
+
+/// Execute a Number cell - parse value from content
+fn execute_number_cell(cell: &Cell) -> Result<CellData> {
+    let content = cell
+        .content
+        .as_str()
+        .ok_or_else(|| anyhow!("Number cell has no inline content"))?;
+
+    let value = content
+        .trim()
+        .parse::<f64>()
+        .map_err(|e| anyhow!("Cannot parse number from cell {}: {}", cell.short_id, e))?;
+
+    Ok(CellData::Number(value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +549,7 @@ mod tests {
             CellType::Text,
             Rectangle::new(0.0, 0.0, 100.0, 100.0),
             CellContent::inline("Test"),
+            "A1".to_string(),
         );
 
         let inputs = vec![CellData::Text("input data".to_string())];

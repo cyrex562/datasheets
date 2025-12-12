@@ -596,6 +596,10 @@ impl Canvas {
             chunk_id: cell.chunk_id,
             split_direction: Some(direction),
             preview_mode: None,
+            computed_result: cell.computed_result,
+            result_target_cell: cell.result_target_cell,
+            currency_symbol: cell.currency_symbol.clone(),
+            decimal_precision: cell.decimal_precision,
         };
 
         let child2 = Cell {
@@ -611,6 +615,10 @@ impl Canvas {
             chunk_id: cell.chunk_id,
             split_direction: Some(direction),
             preview_mode: None,
+            computed_result: None,
+            result_target_cell: None,
+            currency_symbol: "$".to_string(),
+            decimal_precision: 0,
         };
 
         // Update parent cell's children list

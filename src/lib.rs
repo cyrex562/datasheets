@@ -6,6 +6,7 @@ pub mod event;
 pub mod execution;
 pub mod id_generator;
 pub mod markdown_links;
+pub mod math_eval;
 pub mod relationship;
 pub mod serialization;
 pub mod ui;

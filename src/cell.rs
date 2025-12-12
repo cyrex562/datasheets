@@ -41,6 +41,18 @@ pub struct Cell {
 
     /// Markdown preview mode (None = use global default)
     pub preview_mode: Option<MarkdownPreviewMode>,
+
+    /// Computed result for Math cells (cached)
+    pub computed_result: Option<f64>,
+
+    /// Optional target cell to store result in (for Math cells)
+    pub result_target_cell: Option<Ulid>,
+
+    /// Currency symbol for NumberCurrency cells
+    pub currency_symbol: String,
+
+    /// Decimal precision for Number cells
+    pub decimal_precision: u8,
 }
 
 /// Markdown preview mode for text cells
@@ -81,6 +93,14 @@ impl Cell {
             chunk_id: None,
             split_direction: None,
             preview_mode: None,
+            computed_result: None,
+            result_target_cell: None,
+            currency_symbol: "$".to_string(),
+            decimal_precision: match cell_type {
+                CellType::NumberCurrency => 2,
+                CellType::NumberFloat => 2,
+                _ => 0,
+            },
         }
     }
 
@@ -105,6 +125,14 @@ impl Cell {
             chunk_id: None,
             split_direction: None,
             preview_mode: None,
+            computed_result: None,
+            result_target_cell: None,
+            currency_symbol: "$".to_string(),
+            decimal_precision: match cell_type {
+                CellType::NumberCurrency => 2,
+                CellType::NumberFloat => 2,
+                _ => 0,
+            },
         }
     }
 
@@ -195,6 +223,10 @@ impl Rectangle {
 pub enum CellType {
     Text,
     Python,
+    Math,
+    NumberInt,
+    NumberFloat,
+    NumberCurrency,
     // Future: Markdown, Json, Csv, Image, VisualBlock, etc.
 }
 
@@ -256,6 +288,7 @@ mod tests {
             CellType::Text,
             Rectangle::new(0.0, 0.0, 100.0, 100.0),
             CellContent::inline("Hello"),
+            "A1".to_string(),
         );
 
         assert_eq!(cell.cell_type, CellType::Text);
@@ -306,6 +339,7 @@ mod tests {
             CellType::Text,
             Rectangle::new(0.0, 0.0, 100.0, 100.0),
             CellContent::inline("Hello"),
+            "A1".to_string(),
         );
 
         cell.set_name(Some("TestCell".to_string()));

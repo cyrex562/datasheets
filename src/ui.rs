@@ -432,10 +432,21 @@ impl GraphCellEditorApp {
                     cell.content.clone(),
                     cell.is_start_point,
                     cell.bounds,
+                    cell.computed_result,
+                    cell.result_target_cell,
                 )
             });
 
-            if let Some((name_opt, cell_type_orig, content, is_start_orig, bounds)) = cell_data {
+            if let Some((
+                name_opt,
+                cell_type_orig,
+                content,
+                is_start_orig,
+                bounds,
+                computed_result,
+                result_target_cell,
+            )) = cell_data
+            {
                 ui.label(format!("Cell ID: {}", cell_id));
                 ui.separator();
 
@@ -458,10 +469,186 @@ impl GraphCellEditorApp {
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut cell_type, CellType::Text, "Text");
                         ui.selectable_value(&mut cell_type, CellType::Python, "Python");
+                        ui.selectable_value(&mut cell_type, CellType::Math, "Math");
+                        ui.selectable_value(&mut cell_type, CellType::NumberInt, "Integer");
+                        ui.selectable_value(&mut cell_type, CellType::NumberFloat, "Float");
+                        ui.selectable_value(&mut cell_type, CellType::NumberCurrency, "Currency");
                     });
 
                 if cell_type != cell_type_orig {
                     let _ = self.canvas.update_cell_type(cell_id, cell_type);
+                }
+
+                // Math/Number specific settings
+                if matches!(cell_type, CellType::Math) {
+                    ui.separator();
+
+                    // Show computed result
+                    if let Some(result) = computed_result {
+                        ui.label(format!("Result: {}", result));
+                    } else {
+                        ui.label("Result: Not computed");
+                    }
+
+                    // Target cell selector
+                    ui.label("Target Cell (optional):");
+                    let current_target = result_target_cell
+                        .and_then(|id| self.canvas.get_cell(id).map(|c| c.short_id.clone()));
+
+                    let mut selected_target =
+                        current_target.clone().unwrap_or_else(|| "None".to_string());
+                    egui::ComboBox::from_id_salt("target_cell")
+                        .selected_text(&selected_target)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut selected_target, "None".to_string(), "None");
+                            for (id, c) in self.canvas.cells() {
+                                if *id != cell_id {
+                                    ui.selectable_value(
+                                        &mut selected_target,
+                                        c.short_id.clone(),
+                                        &c.short_id,
+                                    );
+                                }
+                            }
+                        });
+
+                    if selected_target != current_target.unwrap_or_else(|| "None".to_string()) {
+                        let target_id = if selected_target == "None" {
+                            None
+                        } else {
+                            self.canvas.get_cell_id_by_short_id(&selected_target)
+                        };
+
+                        if let Some(cell_mut) = self.canvas.get_cell_mut(cell_id) {
+                            cell_mut.result_target_cell = target_id;
+                        }
+
+                        // Automatically recalculate when target changes
+                        if let Some(cell) = self.canvas.get_cell(cell_id) {
+                            match crate::math_eval::evaluate_expression(
+                                cell.content.as_str().unwrap_or(""),
+                                &self.canvas,
+                            ) {
+                                Ok(result) => {
+                                    // Update the cell's computed result
+                                    if let Some(cell_mut) = self.canvas.get_cell_mut(cell_id) {
+                                        cell_mut.computed_result = Some(result);
+
+                                        // If there's a target cell, update it
+                                        if let Some(target_id) = cell_mut.result_target_cell {
+                                            if let Some(target) =
+                                                self.canvas.get_cell_mut(target_id)
+                                            {
+                                                if matches!(
+                                                    target.cell_type,
+                                                    CellType::NumberInt
+                                                        | CellType::NumberFloat
+                                                        | CellType::NumberCurrency
+                                                ) {
+                                                    let formatted = match target.cell_type {
+                                                        CellType::NumberInt => {
+                                                            format!("{}", result as i64)
+                                                        }
+                                                        CellType::NumberFloat => format!(
+                                                            "{:.prec$}",
+                                                            result,
+                                                            prec =
+                                                                target.decimal_precision as usize
+                                                        ),
+                                                        CellType::NumberCurrency => format!(
+                                                            "{:.prec$}",
+                                                            result,
+                                                            prec =
+                                                                target.decimal_precision as usize
+                                                        ),
+                                                        _ => result.to_string(),
+                                                    };
+                                                    target.content = CellContent::inline(formatted);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    // Invalid expression - ignore
+                                }
+                            }
+                        }
+                    }
+
+                    // Recalculate button
+                    if ui.button("🔄 Recalculate").clicked() {
+                        if let Some(cell) = self.canvas.get_cell(cell_id) {
+                            match crate::math_eval::evaluate_expression(
+                                cell.content.as_str().unwrap_or(""),
+                                &self.canvas,
+                            ) {
+                                Ok(result) => {
+                                    let target_cell_id = self
+                                        .canvas
+                                        .get_cell(cell_id)
+                                        .and_then(|c| c.result_target_cell);
+
+                                    if let Some(cell_mut) = self.canvas.get_cell_mut(cell_id) {
+                                        cell_mut.computed_result = Some(result);
+                                    }
+
+                                    // If there's a target cell, update it
+                                    if let Some(target_id) = target_cell_id {
+                                        if let Some(target) = self.canvas.get_cell_mut(target_id) {
+                                            target.computed_result = Some(result);
+
+                                            // For Number type cells, also update their content
+                                            if matches!(
+                                                target.cell_type,
+                                                CellType::NumberInt
+                                                    | CellType::NumberFloat
+                                                    | CellType::NumberCurrency
+                                            ) {
+                                                let formatted = match target.cell_type {
+                                                    CellType::NumberInt => {
+                                                        format!("{}", result as i64)
+                                                    }
+                                                    CellType::NumberFloat => format!(
+                                                        "{:.prec$}",
+                                                        result,
+                                                        prec = target.decimal_precision as usize
+                                                    ),
+                                                    CellType::NumberCurrency => format!(
+                                                        "{:.prec$}",
+                                                        result,
+                                                        prec = target.decimal_precision as usize
+                                                    ),
+                                                    _ => result.to_string(),
+                                                };
+                                                target.content = CellContent::inline(formatted);
+                                            }
+                                        }
+                                    }
+
+                                    self.status_message = format!("✓ Calculated: {}", result);
+                                }
+                                Err(e) => {
+                                    self.status_message = format!("⚠ Math error: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if matches!(cell_type, CellType::NumberCurrency) {
+                    ui.separator();
+                    ui.label("Currency Symbol:");
+                    if let Some(cell_mut) = self.canvas.get_cell_mut(cell_id) {
+                        ui.text_edit_singleline(&mut cell_mut.currency_symbol);
+                    }
+                }
+
+                if matches!(cell_type, CellType::NumberFloat | CellType::NumberCurrency) {
+                    ui.label("Decimal Precision:");
+                    if let Some(cell_mut) = self.canvas.get_cell_mut(cell_id) {
+                        ui.add(egui::Slider::new(&mut cell_mut.decimal_precision, 0..=10));
+                    }
                 }
 
                 ui.separator();
@@ -471,9 +658,70 @@ impl GraphCellEditorApp {
                 if let Some(content_str) = content.as_str() {
                     let mut content_edit = content_str.to_string();
                     if ui.text_edit_multiline(&mut content_edit).changed() {
+                        let _ = self.canvas.update_cell_content(
+                            cell_id,
+                            CellContent::inline(content_edit.clone()),
+                        );
+
+                        // If this is a Math cell, try to calculate it automatically
+                        if matches!(cell_type, CellType::Math) {
+                            if let Some(_cell) = self.canvas.get_cell(cell_id) {
+                                match crate::math_eval::evaluate_expression(
+                                    &content_edit,
+                                    &self.canvas,
+                                ) {
+                                    Ok(result) => {
+                                        // Update the cell's computed result
+                                        if let Some(cell_mut) = self.canvas.get_cell_mut(cell_id) {
+                                            cell_mut.computed_result = Some(result);
+
+                                            // If there's a target cell, update it
+                                            if let Some(target_id) = cell_mut.result_target_cell {
+                                                if let Some(target) =
+                                                    self.canvas.get_cell_mut(target_id)
+                                                {
+                                                    if matches!(
+                                                        target.cell_type,
+                                                        CellType::NumberInt
+                                                            | CellType::NumberFloat
+                                                            | CellType::NumberCurrency
+                                                    ) {
+                                                        let formatted = match target.cell_type {
+                                                            CellType::NumberInt => {
+                                                                format!("{}", result as i64)
+                                                            }
+                                                            CellType::NumberFloat => format!(
+                                                                "{:.prec$}",
+                                                                result,
+                                                                prec = target.decimal_precision
+                                                                    as usize
+                                                            ),
+                                                            CellType::NumberCurrency => format!(
+                                                                "{:.prec$}",
+                                                                result,
+                                                                prec = target.decimal_precision
+                                                                    as usize
+                                                            ),
+                                                            _ => result.to_string(),
+                                                        };
+                                                        target.content =
+                                                            CellContent::inline(formatted);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Invalid expression - ignore silently or could show error
+                                    }
+                                }
+                            }
+                        }
+
+                        // Recalculate dependent cells automatically
                         let _ = self
-                            .canvas
-                            .update_cell_content(cell_id, CellContent::inline(content_edit));
+                            .execution_engine
+                            .recalculate_dependents(cell_id, &mut self.canvas);
                     }
                 }
 
@@ -988,6 +1236,10 @@ impl GraphCellEditorApp {
             let fill = match cell.cell_type {
                 CellType::Text => Color32::from_rgb(240, 240, 240),
                 CellType::Python => Color32::from_rgb(230, 255, 230),
+                CellType::Math => Color32::from_rgb(200, 220, 255),
+                CellType::NumberInt => Color32::from_rgb(220, 255, 220),
+                CellType::NumberFloat => Color32::from_rgb(220, 255, 255),
+                CellType::NumberCurrency => Color32::from_rgb(255, 255, 220),
             };
             (fill, Color32::DARK_GRAY, 2.0)
         };
@@ -1064,6 +1316,92 @@ impl GraphCellEditorApp {
             vec2(screen_rect.width() - 10.0, screen_rect.height() - 30.0).max(vec2(10.0, 10.0)),
         );
 
+        // Handle Math and Number cells specially
+        match cell.cell_type {
+            CellType::Math => {
+                // Show formula and computed result
+                if let Some(formula) = cell.content.as_str() {
+                    let mut child_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(content_rect)
+                            .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    );
+
+                    egui::ScrollArea::both()
+                        .id_salt(cell.id)
+                        .auto_shrink([false, false])
+                        .show(&mut child_ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(formula)
+                                    .size(12.0)
+                                    .family(egui::FontFamily::Monospace),
+                            );
+
+                            if let Some(result) = cell.computed_result {
+                                ui.label(
+                                    egui::RichText::new(format!("→ {}", result))
+                                        .size(12.0)
+                                        .color(Color32::from_rgb(0, 150, 0)),
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("→ Not computed")
+                                        .size(12.0)
+                                        .color(Color32::GRAY),
+                                );
+                            }
+                        });
+                }
+                return;
+            }
+            CellType::NumberInt | CellType::NumberFloat | CellType::NumberCurrency => {
+                // Format and display number
+                if let Some(content) = cell.content.as_str() {
+                    if let Ok(value) = content.trim().parse::<f64>() {
+                        let mut child_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(content_rect)
+                                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                        );
+
+                        egui::ScrollArea::both()
+                            .id_salt(cell.id)
+                            .auto_shrink([false, false])
+                            .show(&mut child_ui, |ui| {
+                                let formatted = match cell.cell_type {
+                                    CellType::NumberInt => format!("{}", value as i64),
+                                    CellType::NumberFloat => {
+                                        format!(
+                                            "{:.prec$}",
+                                            value,
+                                            prec = cell.decimal_precision as usize
+                                        )
+                                    }
+                                    CellType::NumberCurrency => {
+                                        format!(
+                                            "{}{:.prec$}",
+                                            cell.currency_symbol,
+                                            value,
+                                            prec = cell.decimal_precision as usize
+                                        )
+                                    }
+                                    _ => value.to_string(),
+                                };
+
+                                ui.label(
+                                    egui::RichText::new(formatted)
+                                        .size(14.0)
+                                        .family(egui::FontFamily::Monospace),
+                                );
+                            });
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Handle Text and Python cells with markdown rendering
         if let Some(content) = cell.content.as_str() {
             let preview_mode = cell
                 .preview_mode
@@ -1304,6 +1642,89 @@ impl GraphCellEditorApp {
                     self.ui_state.editing_cell = None;
                     self.ui_state.edit_buffer.clear();
                     self.status_message = "✓ Cell content saved".to_string();
+
+                    // If this is a Math cell, calculate it first
+                    if let Some(cell) = self.canvas.get_cell(cell_id) {
+                        if matches!(cell.cell_type, CellType::Math) {
+                            match crate::math_eval::evaluate_expression(
+                                cell.content.as_str().unwrap_or(""),
+                                &self.canvas,
+                            ) {
+                                Ok(result) => {
+                                    let target_cell_id = self
+                                        .canvas
+                                        .get_cell(cell_id)
+                                        .and_then(|c| c.result_target_cell);
+
+                                    if let Some(cell_mut) = self.canvas.get_cell_mut(cell_id) {
+                                        cell_mut.computed_result = Some(result);
+                                    }
+
+                                    // If there's a target cell, update it
+                                    if let Some(target_id) = target_cell_id {
+                                        if let Some(target) = self.canvas.get_cell_mut(target_id) {
+                                            target.computed_result = Some(result);
+
+                                            // For Number type cells, also update their content
+                                            if matches!(
+                                                target.cell_type,
+                                                CellType::NumberInt
+                                                    | CellType::NumberFloat
+                                                    | CellType::NumberCurrency
+                                            ) {
+                                                let formatted = match target.cell_type {
+                                                    CellType::NumberInt => {
+                                                        format!("{}", result as i64)
+                                                    }
+                                                    CellType::NumberFloat => format!(
+                                                        "{:.prec$}",
+                                                        result,
+                                                        prec = target.decimal_precision as usize
+                                                    ),
+                                                    CellType::NumberCurrency => format!(
+                                                        "{:.prec$}",
+                                                        result,
+                                                        prec = target.decimal_precision as usize
+                                                    ),
+                                                    _ => result.to_string(),
+                                                };
+                                                target.content = CellContent::inline(formatted);
+                                            }
+                                        }
+                                    }
+
+                                    self.status_message = format!("✓ Cell calculated: {}", result);
+                                }
+                                Err(e) => {
+                                    self.status_message = format!("⚠ Math error: {}", e);
+                                }
+                            }
+                        }
+                    }
+
+                    // Recalculate dependent Math cells
+                    match self
+                        .execution_engine
+                        .recalculate_dependents(cell_id, &mut self.canvas)
+                    {
+                        Ok(results) => {
+                            let mut errors = Vec::new();
+                            for (dep_cell_id, result) in results {
+                                if let Err(e) = result {
+                                    if let Some(dep_cell) = self.canvas.get_cell(dep_cell_id) {
+                                        errors.push(format!("{}: {}", dep_cell.short_id, e));
+                                    }
+                                }
+                            }
+                            if !errors.is_empty() {
+                                self.status_message =
+                                    format!("⚠ Math errors: {}", errors.join(", "));
+                            }
+                        }
+                        Err(e) => {
+                            self.status_message = format!("⚠ Recalculation error: {}", e);
+                        }
+                    }
                 }
 
                 // Show help text
